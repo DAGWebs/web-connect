@@ -38,15 +38,31 @@ end
 
 function WebConnect.ExecuteAction(value, context)
     local parsed, reason = WebConnect.ParseAction(value)
-    if not parsed then return { status = 400, error = reason } end
+    if not parsed then
+        WebConnect.RecordAudit({
+            action = value, playerId = context.playerId, actor = context.principal,
+            requestId = context.request and context.request.requestId, status = 400, error = reason
+        })
+        return { status = 400, error = reason }
+    end
     context.action = parsed.name
     context.actionOwner = parsed.registration.owner
     local ok, result = pcall(parsed.registration.handler, parsed.arguments, context)
     if not ok then
         WebConnect.Log(('action %q failed: %s'):format(parsed.name, result))
-        return { status = 500, error = 'action_failed' }
+        result = { status = 500, error = 'action_failed' }
     end
-    return result or { status = 200, data = { completed = true, action = parsed.name } }
+    result = result or { status = 200, data = { completed = true, action = parsed.name } }
+    WebConnect.RecordAudit({
+        action = parsed.name,
+        arguments = parsed.arguments,
+        playerId = context.playerId,
+        actor = context.principal,
+        requestId = context.request and context.request.requestId,
+        status = result.status or 200,
+        error = result.error
+    })
+    return result
 end
 
 function WebConnect.ListActions()

@@ -59,10 +59,12 @@ RegisterCommand('webconnect_token', (source, args) => {
         : null;
       tokens.push({ id: randomUUID(), name, hash: digest(secret), scopes, createdAt: new Date().toISOString(), expiresAt });
       persist();
+      emit('web-connect:recordAudit', { action: 'token:create', actor: { name: source === 0 ? 'console' : `player:${source}` }, status: 200 });
       reply(source, `Token created for "${name}" with scopes [${scopes.join(', ')}]. Copy it now: ${secret}`);
       return;
     }
     if (action === 'list') {
+      emit('web-connect:recordAudit', { action: 'token:list', actor: { name: source === 0 ? 'console' : `player:${source}` }, status: 200 });
       if (!tokens.length) return reply(source, 'No saved API tokens.');
       tokens.forEach((token) => reply(source, `${token.id} | ${token.name} | ${token.scopes.join(', ')}`));
       return;
@@ -73,6 +75,7 @@ RegisterCommand('webconnect_token', (source, args) => {
       tokens = tokens.filter((token) => token.id !== id && token.name !== id);
       if (tokens.length === previousLength) return reply(source, 'Token not found.');
       persist();
+      emit('web-connect:recordAudit', { action: 'token:revoke', actor: { name: source === 0 ? 'console' : `player:${source}` }, status: 200 });
       reply(source, `Revoked token ${id}.`);
       return;
     }

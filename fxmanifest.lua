@@ -3,7 +3,7 @@ game 'gta5'
 
 author 'web-connect contributors'
 description 'Authenticated HTTP bridge for triggering allow-listed FiveM server events'
-version '2.2.0'
+version '2.3.0'
 
 server_only 'yes'
 
@@ -14,6 +14,7 @@ server_scripts {
     'server/core/schema.lua',
     'server/integrations/framework.lua',
     'server/core/registry.lua',
+    'server/core/audit.lua',
     'server/core/actions.lua',
     'server/integrations/builtins.lua',
     'server/integrations/actions.lua',

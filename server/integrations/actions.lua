@@ -151,22 +151,42 @@ WebConnect.Register({
 
 RegisterCommand('connect', function(source, arguments)
     local subcommand = (arguments[1] or ''):lower()
-    if subcommand == 'help' or subcommand == 'list' or subcommand == '' then
-        local function reply(message)
-            if source == 0 then WebConnect.Log(message)
-            else TriggerClientEvent('chat:addMessage', source, { args = { 'WEB CONNECT', message } }) end
+    local function reply(message)
+        if source == 0 then WebConnect.Log(message)
+        else TriggerClientEvent('chat:addMessage', source, { args = { 'WEB CONNECT', message } }) end
+    end
+    if subcommand == 'logs' then
+        for _, entry in ipairs(WebConnect.GetAuditEntries(arguments[2])) do
+            local actor = entry.actor and (entry.actor.name or entry.actor.id) or 'unknown'
+            reply(('%s | %s | player %s | %s | HTTP %s%s'):format(
+                entry.timestamp,
+                actor,
+                entry.playerId or '-',
+                entry.action or '-',
+                entry.status or '-',
+                entry.error and (' | ' .. entry.error) or ''
+            ))
         end
+        WebConnect.RecordAudit({ action = 'admin:logs', actor = { name = source == 0 and 'console' or GetPlayerName(source) }, status = 200 })
+        return
+    end
+    if subcommand == 'help' or subcommand == 'list' or subcommand == '' then
         reply('Usage: /connect <playerId> <action> [arguments]')
+        reply('Admin: /connect list | /connect logs [limit]')
         for _, action in ipairs(WebConnect.ListActions()) do
             reply(('%s - %s'):format(action.usage, action.description))
         end
+        WebConnect.RecordAudit({ action = 'admin:list', actor = { name = source == 0 and 'console' or GetPlayerName(source) }, status = 200 })
         return
     end
     local playerId = math.tointeger(tonumber(table.remove(arguments, 1)))
-    if not playerId or not WebConnect.GetPlayer(playerId) then return end
+    if not playerId or not WebConnect.GetPlayer(playerId) then
+        WebConnect.RecordAudit({ action = table.concat(arguments, ':'), playerId = playerId, actor = { name = source == 0 and 'console' or GetPlayerName(source) }, status = 404, error = 'player_not_found' })
+        reply('Failed: player_not_found')
+        return
+    end
     local action = Config.ActionPrefix .. ':' .. table.concat(arguments, ':')
     local result = WebConnect.ExecuteAction(action, { playerId = playerId, source = playerId, principal = { name = 'command' } })
     local message = result.error and ('Failed: ' .. result.error) or 'Action completed.'
-    if source == 0 then WebConnect.Log(message)
-    else TriggerClientEvent('chat:addMessage', source, { args = { 'WEB CONNECT', message } }) end
+    reply(message)
 end, true)

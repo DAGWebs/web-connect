@@ -33,3 +33,14 @@ test('HTTP action catalog is available to authenticated callers', async () => {
   assert.match(router, /'\/actions'/);
   assert.match(router, /WebConnect\.ListActions/);
 });
+
+test('direct and batch API actions are audited', async () => {
+  const router = await readFile('server/http/router.lua', 'utf8');
+  const audit = await readFile('server/core/audit.lua', 'utf8');
+  const actions = await readFile('server/integrations/actions.lua', 'utf8');
+  assert.match(router, /ActionApiPrefix/);
+  assert.match(router, /directAction:lower\(\) == 'batch'/);
+  assert.match(router, /IdempotencyLookup/);
+  assert.match(audit, /data\/audit\.json/);
+  assert.match(actions, /subcommand == 'logs'/);
+});

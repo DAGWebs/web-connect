@@ -16,6 +16,7 @@ server/core/namespace.lua      Shared namespace and logging
 server/core/registry.lua       Integration registration and dispatch
 server/core/schema.lua         Request schema validation
 server/core/actions.lua        Colon action parsing and action registry
+server/core/audit.lua          Persistent admin-visible command audit
 server/http/request.lua        Request body and JSON parsing
 server/http/response.lua       JSON response formatting
 server/http/security.lua       Authentication and rate limiting
@@ -174,6 +175,12 @@ Run `/connect help` or `/connect list` to print every currently registered actio
 its arguments, and its description. Websites can retrieve the same live catalog
 with authenticated `GET /web-connect/actions` using the `action:execute` scope.
 
+Run `/connect logs` or `/connect logs 50` to view recent audit entries in game.
+The ACE-restricted command shows the timestamp, API credential or administrator,
+target player, action, HTTP-style status, and error. Logs are capped and persisted
+to the git-ignored `data/audit.json`; every action, failed action, token-management
+operation, and log/list access also emits `web-connect:audit` for external logging.
+
 Common actions included by default:
 
 | Command | Result |
@@ -199,6 +206,51 @@ add_ace group.admin command.connect allow
 
 The player must be online and `42` is their current server ID. The command and
 HTTP endpoint use the same parser and action registry.
+
+### Direct and batch action API
+
+Every registered action is also available as a direct endpoint. The URL selects
+an allow-listed action; callers can never provide a resource export or event name:
+
+```http
+POST /api/givecar
+Authorization: Bearer <token with action:execute>
+Content-Type: application/json
+
+{"playerId":42,"arguments":["adder"]}
+```
+
+Money and item examples use the same format:
+
+```json
+{"playerId":42,"arguments":[1000]}
+```
+
+Use `POST /api/batch` to connect multiple commands. A top-level `playerId` applies
+to every command unless a command provides its own target:
+
+```http
+POST /api/batch
+Authorization: Bearer <token with action:execute>
+Content-Type: application/json
+Idempotency-Key: purchase-8291
+
+{
+  "playerId": 42,
+  "stopOnError": true,
+  "commands": [
+    {"name":"giveCar","arguments":["adder"]},
+    {"name":"giveCash","arguments":[1000]},
+    {"name":"giveItem","arguments":["phone",1]}
+  ]
+}
+```
+
+Commands may alternatively provide a full string such as
+`{"action":"connect:giveBank:5000"}`. Batches execute sequentially and return
+HTTP `207` when any command fails. They are not database transactions: an earlier
+successful framework or paid-script operation cannot automatically be rolled back.
+Keep `stopOnError` enabled for purchase/reward flows and use an idempotency key.
 
 ### Configure a paid or custom script
 
@@ -367,7 +419,11 @@ responses are replayed and concurrent duplicates are rejected for five minutes.
 | `RequestTimeoutMs` | `10000` | Default typed-handler timeout |
 | `DocsEnabled` | `true` | Serve OpenAPI and Scalar documentation |
 | `ActionPrefix` | `connect` | Prefix accepted by action strings |
+| `ActionApiPrefix` | `/api` | Prefix for direct and batch action endpoints |
 | `MaxMoneyAction` | `1000000` | Maximum amount per built-in money action |
+| `MaxItemAction` | `1000` | Maximum quantity per item action |
+| `MaxBatchActions` | `10` | Maximum commands in one batch |
+| `AuditMaxEntries` | `500` | Maximum persisted admin audit entries |
 | `ActionConnectors` | VMS example | Allow-listed export/event adapters |
 | `RateLimit` | 30 requests / 60 seconds | Per-address request limit |
 | `Events` | examples | Explicit public event allow-list |

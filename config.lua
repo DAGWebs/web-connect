@@ -68,6 +68,10 @@ Config.Debug = false
 Config.ActionPrefix = 'connect'
 Config.MaxMoneyAction = 1000000
 Config.MaxItemAction = 1000
+Config.ActionApiPrefix = '/api'
+Config.MaxBatchActions = 10
+Config.AuditMaxEntries = 500
+Config.AuditDefaultView = 25
 
 -- Declarative adapters make paid, free, and custom scripts usable without
 -- changing web-connect. Argument tokens: $source, $playerId, $arg1..$arg9,

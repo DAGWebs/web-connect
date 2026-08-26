@@ -18,6 +18,7 @@ async function runtime() {
     RegisterCommand: (_, callback, restricted) => { command = callback; assert.equal(restricted, true); },
     exports: (name, callback) => { registered[name] = callback; },
     emitNet: () => {},
+    emit: () => {},
     console: { log: (message) => logs.push(message), error: (message) => logs.push(message) },
     Buffer,
     Date,

@@ -42,8 +42,42 @@ local function eventPaths(prefix)
     return paths
 end
 
+local function actionPaths(prefix)
+    local paths = {}
+    for _, action in ipairs(WebConnect.ListActions()) do
+        paths[prefix .. '/' .. action.name:lower()] = {
+            post = {
+                summary = action.description,
+                description = 'Usage: ' .. action.usage,
+                tags = { 'Actions' },
+                security = { { bearerAuth = {} } },
+                requestBody = {
+                    required = true,
+                    content = { ['application/json'] = { schema = {
+                        type = 'object', required = { 'playerId' },
+                        properties = {
+                            playerId = { type = 'integer', minimum = 1 },
+                            arguments = { type = 'array', items = { type = { 'string', 'number' } } }
+                        }
+                    } } }
+                },
+                responses = { ['200'] = { description = 'Action result' }, ['422'] = { description = 'Invalid arguments' } }
+            }
+        }
+    end
+    paths[prefix .. '/batch'] = {
+        post = {
+            summary = 'Execute multiple actions for one or more players',
+            tags = { 'Actions' }, security = { { bearerAuth = {} } },
+            responses = { ['200'] = { description = 'All actions completed' }, ['207'] = { description = 'One or more actions failed' } }
+        }
+    }
+    return paths
+end
+
 function WebConnect.Http.OpenApi(prefix)
     local paths = eventPaths(prefix)
+    for path, operation in pairs(actionPaths(Config.ActionApiPrefix:gsub('/+$', ''))) do paths[path] = operation end
     paths[prefix .. '/health'] = {
         get = {
             summary = 'Check API availability',
