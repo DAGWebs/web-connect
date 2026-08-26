@@ -1,0 +1,4 @@
+.env
+*.log
+data/token.json
+data/tokens.json

@@ -1,0 +1,93 @@
+local function eventPaths(prefix)
+    local paths = {}
+    for publicName, route in pairs(WebConnect.ListEvents()) do
+        paths[prefix .. '/events/' .. publicName] = {
+            post = {
+                operationId = 'dispatch_' .. publicName,
+                summary = route.summary,
+                description = route.description,
+                tags = route.tags,
+                security = { { bearerAuth = {} } },
+                parameters = {
+                    {
+                        name = 'Idempotency-Key', ['in'] = 'header', required = false,
+                        description = 'Prevents duplicate execution for five minutes.',
+                        schema = { type = 'string', maxLength = 128 }
+                    }
+                },
+                requestBody = {
+                    required = true,
+                    content = {
+                        ['application/json'] = {
+                            schema = route.schema
+                        }
+                    }
+                },
+                responses = {
+                    ['202'] = { description = 'Event accepted' },
+                    ['400'] = { description = 'Invalid JSON payload' },
+                    ['409'] = { description = 'A request with this idempotency key is still running' },
+                    ['401'] = { description = 'Invalid or missing bearer token' },
+                    ['403'] = { description = 'API key lacks the required scope' },
+                    ['404'] = { description = 'Event is not registered' },
+                    ['413'] = { description = 'Request body is too large' },
+                    ['422'] = { description = 'Payload failed schema validation' },
+                    ['429'] = { description = 'Rate limit exceeded' },
+                    ['500'] = { description = 'Integration handler failed' },
+                    ['504'] = { description = 'Integration handler timed out' }
+                }
+            }
+        }
+    end
+    return paths
+end
+
+function WebConnect.Http.OpenApi(prefix)
+    local paths = eventPaths(prefix)
+    paths[prefix .. '/health'] = {
+        get = {
+            summary = 'Check API availability',
+            tags = { 'System' },
+            responses = { ['200'] = { description = 'Resource is running' } }
+        }
+    }
+    paths[prefix .. '/actions'] = {
+        get = {
+            summary = 'List available connect actions',
+            tags = { 'Actions' },
+            security = { { bearerAuth = {} } },
+            responses = { ['200'] = { description = 'Available action names, usage, and descriptions' } }
+        }
+    }
+
+    return {
+        openapi = '3.1.0',
+        info = {
+            title = 'web-connect API',
+            version = GetResourceMetadata(GetCurrentResourceName(), 'version', 0) or 'development',
+            description = 'Authenticated website-to-FiveM event bridge.'
+        },
+        paths = paths,
+        components = {
+            securitySchemes = {
+                bearerAuth = { type = 'http', scheme = 'bearer', bearerFormat = 'token' }
+            }
+        }
+    }
+end
+
+function WebConnect.Http.ScalarPage(prefix)
+    local specificationUrl = prefix .. '/openapi.json'
+    return ([=[<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>web-connect API documentation</title>
+</head>
+<body>
+  <script id="api-reference" data-url="%s"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>]=]):format(specificationUrl)
+end
