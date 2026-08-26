@@ -11,6 +11,7 @@ local MODULES = {
     'server/core/audit.lua',
     'server/core/actions.lua',
     'server/integrations/builtins.lua',
+    'server/integrations/website.lua',
     'server/integrations/actions.lua',
     'server/http/response.lua',
     'server/http/security.lua',
@@ -30,6 +31,7 @@ function harness.new(options)
         players = {},
         convars = {},
         resourceStates = {},
+        aceAllowed = {},
         files = {},
         tokens = {},
         events = {},
@@ -94,6 +96,9 @@ function harness.new(options)
         GetConvar = function(name, fallback) return runtime.convars[name] or fallback end,
         GetGameTimer = function() return runtime.gameTimer end,
         GetPlayerName = function(source) return runtime.players[math.tointeger(tonumber(source)) or -1] end,
+        IsPlayerAceAllowed = function(source, ace)
+            return runtime.aceAllowed[('%s:%s'):format(source, ace)] == true
+        end,
         GetPlayerIdentifiers = function(source)
             return { ('license:%s'):format(source), ('steam:%s'):format(source) }
         end,
@@ -172,6 +177,10 @@ function harness.new(options)
 
     function runtime.addPlayer(source, name)
         runtime.players[source] = name or ('Player%d'):format(source)
+    end
+
+    function runtime.allowAce(source, ace)
+        runtime.aceAllowed[('%s:%s'):format(source, ace or 'command.connect')] = true
     end
 
     function runtime.advance(milliseconds)

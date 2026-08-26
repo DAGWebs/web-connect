@@ -477,6 +477,7 @@ end)
 test('the audit log records which administrator ran a command', function()
     local runtime = harness.new()
     runtime.addPlayer(11, 'AdminJane')
+    runtime.allowAce(11)
     runtime.commands.connect.handler(11, { '11', 'giveCash', '25' })
     local entries = runtime.WebConnect.GetAuditEntries(5)
     local last = entries[#entries]
@@ -495,9 +496,38 @@ test('the audit log is capped at the configured size', function()
     equal(entries[1].action, 'test4', 'oldest kept')
 end)
 
-test('the connect command is registered as restricted', function()
+test('connect is left restricted when the website uses another name', function()
+    local runtime = harness.new({
+        configure = function(Config) Config.Website.Command = 'website' end
+    })
+    equal(runtime.commands.connect.restricted, true, 'admin command stays restricted')
+    equal(runtime.commands.website.restricted, false, 'players can open the site')
+end)
+
+test('connect is unrestricted when it also opens the website', function()
     local runtime = harness.new()
-    equal(runtime.commands.connect.restricted, true)
+    equal(runtime.commands.connect.restricted, false, 'every player may run it')
+    equal(runtime.commands.website, nil, 'no second command is registered')
+end)
+
+test('administrator subcommands are gated even when connect is unrestricted', function()
+    local runtime = harness.new()
+    runtime.addPlayer(20, 'Nosy')
+    runtime.addPlayer(21, 'Victim')
+
+    runtime.commands.connect.handler(20, { '21', 'giveCash', '1000' })
+    equal(#runtime.WebConnect.GetAuditEntries(50), 0, 'nothing was executed')
+    local refusal = runtime.clientEvents[#runtime.clientEvents]
+    truthy(refusal[1].args[2]:match('not allowed'), 'the player was told why')
+
+    runtime.commands.connect.handler(20, { 'logs' })
+    equal(#runtime.WebConnect.GetAuditEntries(50), 0, 'the audit log stays private')
+    runtime.commands.connect.handler(20, { 'list' })
+    equal(#runtime.WebConnect.GetAuditEntries(50), 0, 'the action list stays private')
+
+    runtime.allowAce(20)
+    runtime.commands.connect.handler(20, { 'list' })
+    truthy(#runtime.WebConnect.GetAuditEntries(50) > 0, 'an administrator gets through')
 end)
 
 -- OpenAPI ------------------------------------------------------------------
@@ -731,6 +761,155 @@ test('registering a handler does not mutate the caller definition', function()
     runtime.exports['web-connect'].RegisterHandler(definition, function() end)
     equal(definition.handler, nil, 'the caller table is untouched')
     truthy(runtime.WebConnect.HasEvent('typed'))
+end)
+
+
+-- Website ------------------------------------------------------------------
+
+local function websiteRuntime(overrides)
+    return harness.new({
+        configure = function(Config)
+            Config.Website.Url = 'https://example.com'
+            for key, value in pairs(overrides or {}) do Config.Website[key] = value end
+        end
+    })
+end
+
+test('/connect with no arguments opens the website for the player', function()
+    local runtime = websiteRuntime()
+    runtime.addPlayer(30)
+    runtime.commands.connect.handler(30, {})
+
+    local opened
+    for _, event in ipairs(runtime.clientEvents) do
+        if event.name == 'web-connect:openWebsite' then opened = event end
+    end
+    truthy(opened, 'the tablet was opened')
+    equal(opened.target, 30, 'for the player who ran it')
+    equal(opened[1].url, 'https://example.com/', 'at the configured site')
+end)
+
+test('chat mode sends the link instead of the tablet', function()
+    local runtime = websiteRuntime({ Mode = 'chat' })
+    runtime.addPlayer(31)
+    runtime.commands.connect.handler(31, {})
+
+    local last = runtime.clientEvents[#runtime.clientEvents]
+    equal(last.name, 'chat:addMessage')
+    equal(last[1].args[2], 'https://example.com/')
+end)
+
+test('a path may be chosen but a different site may not', function()
+    local runtime = websiteRuntime()
+    runtime.addPlayer(32)
+
+    equal(runtime.WebConnect.BuildWebsiteUrl('/store', 32), 'https://example.com/store', 'path')
+    equal(runtime.WebConnect.BuildWebsiteUrl('store', 32), 'https://example.com/store', 'leading slash added')
+    equal(runtime.WebConnect.BuildWebsiteUrl('/shop?item=1', 32), 'https://example.com/shop?item=1', 'query kept')
+
+    for _, hostile in ipairs({
+        'https://evil.example/steal',
+        '//evil.example/steal',
+        '/../../etc/passwd',
+        'javascript:alert(1)',
+        '/ok\r\nX-Injected: 1'
+    }) do
+        equal(select(2, runtime.WebConnect.BuildWebsiteUrl(hostile, 32)), 'invalid_path',
+            ('refused %q'):format(hostile))
+    end
+end)
+
+test('the website action opens a page for a player', function()
+    local runtime = websiteRuntime()
+    runtime.addPlayer(33)
+    local response = runtime.request('POST', '/api/openwebsite', {
+        headers = runtime.authorized({ 'action:execute' }),
+        body = { playerId = 33, arguments = { '/store' } }
+    })
+    equal(response.status, 200, 'status')
+
+    local opened
+    for _, event in ipairs(runtime.clientEvents) do
+        if event.name == 'web-connect:openWebsite' then opened = event end
+    end
+    equal(opened[1].url, 'https://example.com/store')
+end)
+
+test('the website action refuses a hostile path', function()
+    local runtime = websiteRuntime()
+    runtime.addPlayer(34)
+    local response = runtime.request('POST', '/api/openwebsite', {
+        headers = runtime.authorized({ 'action:execute' }),
+        body = { playerId = 34, arguments = { 'https://evil.example' } }
+    })
+    equal(response.status, 422)
+    equal(response.body.error, 'invalid_path')
+end)
+
+test('a disabled website restores the restricted connect command', function()
+    local runtime = websiteRuntime({ Enabled = false })
+    runtime.addPlayer(35)
+    equal(select(2, runtime.WebConnect.OpenWebsite(35, '/')), 'website_disabled')
+    equal(runtime.commands.connect.restricted, true, 'connect is administrator-only again')
+end)
+
+test('link codes are single use and expire', function()
+    local runtime = websiteRuntime({ LinkCode = true, LinkCodeTtlSeconds = 60 })
+    runtime.addPlayer(36, 'Linker')
+
+    local url = runtime.WebConnect.BuildWebsiteUrl('/', 36)
+    local code = url:match('code=([%u%d]+)$')
+    truthy(code, 'the url carries a code')
+
+    local entry = runtime.WebConnect.RedeemLinkCode(code)
+    equal(entry.playerId, 36, 'identifies the player')
+    equal(entry.name, 'Linker', 'carries the name')
+    truthy(entry.identifiers.license, 'carries identifiers')
+    equal(runtime.WebConnect.RedeemLinkCode(code), nil, 'a code redeems only once')
+
+    local second = runtime.WebConnect.BuildWebsiteUrl('/', 36):match('code=([%u%d]+)$')
+    runtime.now = runtime.now + 61
+    equal(runtime.WebConnect.RedeemLinkCode(second), nil, 'an expired code is refused')
+end)
+
+test('link codes are only issued when enabled', function()
+    local runtime = websiteRuntime({ LinkCode = false })
+    runtime.addPlayer(37)
+    equal(runtime.WebConnect.BuildWebsiteUrl('/', 37), 'https://example.com/', 'no code appended')
+end)
+
+test('the redeem endpoint exchanges a code over the API', function()
+    local runtime = websiteRuntime({ LinkCode = true })
+    runtime.addPlayer(38, 'Linker')
+    local code = runtime.WebConnect.BuildWebsiteUrl('/', 38):match('code=([%u%d]+)$')
+
+    local response = runtime.request('POST', '/web-connect/events/redeem_link', {
+        headers = runtime.authorized({ 'action:execute' }),
+        body = { code = code }
+    })
+    equal(response.status, 200, 'status')
+    equal(response.body.data.playerId, 38, 'player')
+    equal(response.body.data.online, true, 'still connected')
+
+    equal(runtime.request('POST', '/web-connect/events/redeem_link', {
+        headers = runtime.authorized({ 'action:execute' }), body = { code = code }
+    }).status, 404, 'a replayed code is refused')
+end)
+
+test('the redeem endpoint requires the action scope', function()
+    local runtime = websiteRuntime({ LinkCode = true })
+    equal(runtime.request('POST', '/web-connect/events/redeem_link', {
+        headers = runtime.authorized({ 'event:*' }), body = { code = 'ABCDEFGH' }
+    }).status, 403)
+end)
+
+test('redeeming is unavailable when link codes are off', function()
+    local runtime = websiteRuntime({ LinkCode = false })
+    local response = runtime.request('POST', '/web-connect/events/redeem_link', {
+        headers = runtime.authorized({ 'action:execute' }), body = { code = 'ABCDEFGH' }
+    })
+    equal(response.status, 404)
+    equal(response.body.error, 'link_codes_disabled')
 end)
 
 print(('\n%d passed, %d failed'):format(passes, #failures))

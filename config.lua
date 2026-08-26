@@ -93,3 +93,32 @@ Config.ActionConnectors = {
         description = 'Give a vehicle through VMS Garages V2'
     }
 }
+
+-- Website ------------------------------------------------------------------
+
+-- `/connect` with no arguments opens the server website for the player who ran
+-- it. Admin subcommands (`/connect <playerId> <action>`, `list`, `logs`) stay
+-- restricted to `command.connect` and are unaffected.
+Config.Website = {
+    Enabled = true,
+
+    -- The site to open. Everything the tablet loads is built from this origin,
+    -- so a caller can choose a path but never a different website.
+    Url = 'https://example.com',
+    Title = 'Server Website',
+
+    -- 'tablet' renders the site on an in-game screen. 'chat' prints the link
+    -- instead, which is the right choice if your site refuses to be framed
+    -- (X-Frame-Options / Content-Security-Policy frame-ancestors).
+    Mode = 'tablet',
+
+    -- The command that opens the site. Set this to something else (for example
+    -- 'website') to leave `/connect` entirely to administrators.
+    Command = 'connect',
+
+    -- Opening the site can carry a single-use code identifying the player, so
+    -- the website can sign them in. The site redeems it through the API with
+    -- POST /web-connect/events/redeem_link. Off unless your site implements it.
+    LinkCode = false,
+    LinkCodeTtlSeconds = 300
+}

@@ -3,9 +3,7 @@ game 'gta5'
 
 author 'web-connect contributors'
 description 'Authenticated HTTP bridge for triggering allow-listed FiveM server events'
-version '2.4.0'
-
-server_only 'yes'
+version '2.5.0'
 
 server_scripts {
     'server/token-manager.js',
@@ -17,6 +15,7 @@ server_scripts {
     'server/core/audit.lua',
     'server/core/actions.lua',
     'server/integrations/builtins.lua',
+    'server/integrations/website.lua',
     'server/integrations/actions.lua',
     'server/http/response.lua',
     'server/http/security.lua',
@@ -25,4 +24,18 @@ server_scripts {
     'server/http/openapi.lua',
     'server/http/router.lua',
     'server/init.lua'
+}
+
+-- The in-game website screen is the only client-side feature; everything else
+-- remains server-only.
+client_scripts {
+    'client/website.lua'
+}
+
+ui_page 'html/index.html'
+
+files {
+    'html/index.html',
+    'html/style.css',
+    'html/app.js'
 }

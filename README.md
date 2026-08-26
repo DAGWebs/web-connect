@@ -26,6 +26,9 @@ server/http/router.lua         HTTP routes only
 server/integrations/framework.lua  Framework detection and normalized exports
 server/integrations/builtins.lua   Included announcement/notification handlers
 server/integrations/actions.lua    Money, commands, and configured connectors
+server/integrations/website.lua    In-game website screen and link codes
+client/website.lua                 NUI control for the website screen
+html/                              The in-game website screen
 server/init.lua                Startup checks
 server/token-manager.js        Secure token generation and persistence
 data/                          Runtime token storage (secret is git-ignored)
@@ -228,6 +231,87 @@ add_ace group.admin command.connect allow
 
 The player must be online and `42` is their current server ID. The command and
 HTTP endpoint use the same parser and action registry.
+
+## Open the website in game
+
+`/connect` on its own opens the server website for the player who ran it. Set the
+address first:
+
+```lua
+Config.Website = {
+    Enabled = true,
+    Url = 'https://your-server.example',
+    Title = 'Server Website',
+    Mode = 'tablet'
+}
+```
+
+`tablet` mode renders the site on an in-game screen; Escape or the close button
+dismisses it, and a **Copy link** button puts the address on the player's
+clipboard. `chat` mode skips the screen and prints the link instead.
+
+**Your site must allow being framed.** A page served with `X-Frame-Options: DENY`
+or a restrictive `Content-Security-Policy: frame-ancestors` will not render in the
+tablet — the screen detects this and offers the link to copy instead. Either allow
+framing for the page you point `/connect` at, or use `Mode = 'chat'`. FiveM has no
+native for opening the player's external browser, which is why copying the link is
+the fallback rather than launching one.
+
+A player may also open a specific page with `/connect store`, and the website can
+push a page to someone in game:
+
+```http
+POST /api/openwebsite
+Authorization: Bearer <token with action:execute>
+Content-Type: application/json
+
+{"playerId":42,"arguments":["/store"]}
+```
+
+The path is joined to `Config.Website.Url`, and anything carrying a scheme, an
+authority, or a `..` escape is refused with `invalid_path`. A caller chooses a page
+on your site; it can never point the in-game browser somewhere else.
+
+### Sharing the command with administrators
+
+`/connect` cannot be ACE restricted while every player needs to run it, so the
+administrator subcommands check `command.connect` individually instead:
+`/connect <playerId> <action>`, `/connect list`, and `/connect logs` still require
+the ACE, and a player without it is told so. The `add_ace` line above is unchanged.
+
+If you would rather keep `/connect` entirely to administrators, give the website
+its own command:
+
+```lua
+Config.Website.Command = 'website'   -- players run /website
+```
+
+`/connect` is then registered restricted exactly as before. Setting
+`Config.Website.Enabled = false` does the same.
+
+### Signing the player in
+
+With `Config.Website.LinkCode = true`, the opened URL carries a single-use
+`?code=` that identifies the player who ran the command. Your site redeems it from
+its backend:
+
+```http
+POST /web-connect/events/redeem_link
+Authorization: Bearer <token with action:execute>
+Content-Type: application/json
+
+{"code":"K7RQ2M..."}
+```
+
+```json
+{"data":{"playerId":42,"name":"Jane","identifiers":{"license":"license:...","steam":"steam:..."},"online":true}}
+```
+
+Codes expire after `LinkCodeTtlSeconds` (five minutes by default) and are consumed
+on first use, so a code caught in a browser history or a referrer header is already
+spent. Redeem it from your backend, never from browser JavaScript — the request
+needs an API token. The feature is off by default; leave it off unless your site
+implements the exchange.
 
 ### Direct and batch action API
 
@@ -456,11 +540,19 @@ its commands did take effect.
 | `MaxBatchActions` | `10` | Maximum commands in one batch |
 | `AuditMaxEntries` | `500` | Maximum persisted admin audit entries |
 | `ActionConnectors` | VMS example | Allow-listed export/event adapters |
-| `RateLimit` | 30 requests / 60 seconds | Per-address request limit |
+| `RateLimit.requests` | `120` | Requests per credential per window |
+| `RateLimit.anonymousRequests` | `30` | Unauthenticated requests per address per window |
+| `Website.Url` | unset | Site opened by `/connect` |
+| `Website.Mode` | `tablet` | In-game screen, or `chat` to print the link |
+| `Website.Command` | `connect` | Command players run to open the site |
+| `Website.LinkCode` | `false` | Attach a single-use code identifying the player |
 | `Events` | examples | Explicit public event allow-list |
 
-The rate limit applies to every route, including the unauthenticated `/health`,
-`/openapi.json`, and `/docs` endpoints. The OpenAPI document is rebuilt only when an
+Rate limiting keeps two buckets. Unauthenticated traffic — `/health`,
+`/openapi.json`, `/docs`, and failed authentication — is metered per address, since
+that is the only identity available. Authenticated traffic is metered per
+credential, because a website makes every call from one backend address and
+metering those by address would cap the whole site at one caller's budget. The OpenAPI document is rebuilt only when an
 event or action is registered or removed, so repeated documentation requests do not
 re-serialise it. The in-memory rate limiter resets on resource restart. For an
 internet-facing production deployment, also enforce TLS, request limits, and IP

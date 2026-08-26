@@ -13,6 +13,7 @@ test('the manifest loads every module in dependency order', async () => {
     'server/core/registry.lua',
     'server/core/audit.lua',
     'server/core/actions.lua',
+    'server/integrations/website.lua',
     'server/integrations/actions.lua',
     'server/http/security.lua',
     'server/http/request.lua',
@@ -33,4 +34,17 @@ test('the token store is never committed', async () => {
   const ignore = await readFile('.gitignore', 'utf8');
   assert.match(ignore, /^data\/tokens\.json$/m);
   assert.match(ignore, /^data\/audit\.json$/m);
+});
+
+test('the in-game website screen is wired into the manifest', async () => {
+  const manifest = await readFile('fxmanifest.lua', 'utf8');
+  assert.match(manifest, /ui_page 'html\/index\.html'/);
+  for (const asset of ['html/index.html', 'html/style.css', 'html/app.js']) {
+    assert.ok(manifest.includes(asset), `${asset} is listed in files`);
+    await readFile(asset, 'utf8');
+  }
+  assert.match(manifest, /client_scripts/);
+  await readFile('client/website.lua', 'utf8');
+  // The client script would never load while the resource declares server_only.
+  assert.ok(!manifest.includes('server_only'), 'server_only is not set');
 });

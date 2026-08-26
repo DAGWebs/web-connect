@@ -169,15 +169,66 @@ WebConnect.Register({
     end
 }, nil, GetCurrentResourceName())
 
+local website = Config.Website or { Enabled = false }
+local websiteCommand = website.Enabled and website.Command or nil
+-- When the website shares the `/connect` name the command cannot be ACE
+-- restricted, or non-administrators could not run it at all. The administrator
+-- subcommands are gated individually instead, so the restriction is unchanged
+-- for them. Point Config.Website.Command at another name to keep `/connect`
+-- entirely to administrators.
+local sharesConnect = websiteCommand == 'connect'
+
+local function actorFor(source)
+    if source == 0 then return { id = 'console', name = 'console' } end
+    return {
+        id = ('player:%d'):format(source),
+        name = GetPlayerName(source) or ('player:%d'):format(source)
+    }
+end
+
+local function replyTo(source, message)
+    if source == 0 then WebConnect.Log(message)
+    else TriggerClientEvent('chat:addMessage', source, { args = { 'WEB CONNECT', message } }) end
+end
+
+local function isAdministrator(source)
+    return source == 0 or IsPlayerAceAllowed(source, 'command.connect')
+end
+
+local function openWebsiteFor(source, path)
+    if source == 0 then
+        replyTo(source, 'The website can only be opened for a player in game.')
+        return
+    end
+    local ok, reason = WebConnect.OpenWebsite(source, path)
+    if not ok then
+        replyTo(source, ('Could not open the website: %s'):format(reason))
+        return
+    end
+    if website.Mode ~= 'chat' then replyTo(source, 'Opening the website.') end
+end
+
 RegisterCommand('connect', function(source, arguments)
     local subcommand = (arguments[1] or ''):lower()
-    local actor = source == 0
-        and { id = 'console', name = 'console' }
-        or { id = ('player:%d'):format(source), name = GetPlayerName(source) or ('player:%d'):format(source) }
-    local function reply(message)
-        if source == 0 then WebConnect.Log(message)
-        else TriggerClientEvent('chat:addMessage', source, { args = { 'WEB CONNECT', message } }) end
+    local actor = actorFor(source)
+    local function reply(message) replyTo(source, message) end
+
+    if subcommand == '' or subcommand == 'site' or subcommand == 'website' then
+        if sharesConnect then
+            openWebsiteFor(source, arguments[2])
+            return
+        end
+        if not isAdministrator(source) then reply('You are not allowed to run this command.') return end
+        reply('Usage: /connect <playerId> <action> [arguments]')
+        reply('Admin: /connect list | /connect logs [limit]')
+        return
     end
+
+    if not isAdministrator(source) then
+        reply('You are not allowed to run this command.')
+        return
+    end
+
     if subcommand == 'logs' then
         for _, entry in ipairs(WebConnect.GetAuditEntries(arguments[2])) do
             local entryActor = entry.actor and (entry.actor.name or entry.actor.id) or 'unknown'
@@ -193,15 +244,17 @@ RegisterCommand('connect', function(source, arguments)
         WebConnect.RecordAudit({ action = 'admin:logs', actor = actor, status = 200 })
         return
     end
-    if subcommand == 'help' or subcommand == 'list' or subcommand == '' then
+    if subcommand == 'help' or subcommand == 'list' then
         reply('Usage: /connect <playerId> <action> [arguments]')
         reply('Admin: /connect list | /connect logs [limit]')
+        if sharesConnect then reply('Players: /connect opens the server website.') end
         for _, action in ipairs(WebConnect.ListActions()) do
             reply(('%s - %s'):format(action.usage, action.description))
         end
         WebConnect.RecordAudit({ action = 'admin:list', actor = actor, status = 200 })
         return
     end
+
     local playerId = math.tointeger(tonumber(table.remove(arguments, 1)))
     if not playerId or not WebConnect.GetPlayer(playerId) then
         WebConnect.RecordAudit({ action = table.concat(arguments, ':'), playerId = playerId, actor = actor, status = 404, error = 'player_not_found' })
@@ -212,4 +265,10 @@ RegisterCommand('connect', function(source, arguments)
     local result = WebConnect.ExecuteAction(action, { playerId = playerId, source = playerId, principal = actor })
     local message = result.error and ('Failed: ' .. result.error) or 'Action completed.'
     reply(message)
-end, true)
+end, not sharesConnect)
+
+if websiteCommand and not sharesConnect then
+    RegisterCommand(websiteCommand, function(source, arguments)
+        openWebsiteFor(source, arguments[1])
+    end, false)
+end

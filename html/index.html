@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>web-connect</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="shell" hidden>
+    <div id="tablet" role="dialog" aria-modal="true" aria-labelledby="title">
+      <header>
+        <span id="title">Website</span>
+        <div class="controls">
+          <button id="copy" type="button" title="Copy the link">Copy link</button>
+          <button id="close" type="button" title="Close (Esc)" aria-label="Close">&times;</button>
+        </div>
+      </header>
+      <div id="viewport">
+        <iframe id="frame" title="Server website" referrerpolicy="no-referrer"
+                sandbox="allow-forms allow-scripts allow-same-origin allow-popups"></iframe>
+        <div id="fallback" hidden>
+          <h1>This page will not open here</h1>
+          <p>The site refused to load inside the game. Open it in your browser instead:</p>
+          <code id="fallback-url"></code>
+          <button id="fallback-copy" type="button">Copy link</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
