@@ -1,7 +1,7 @@
 CreateThread(function()
     Wait(0)
-    if GetConvar(Config.TokenConvar, '') == '' then
-        WebConnect.Log(('WARNING: set convar %q before using the HTTP API'):format(Config.TokenConvar))
+    if not WebConnect.Http.TokenConfigured() then
+        WebConnect.Log(('WARNING: set convar %q or run webconnect_token create <name>'):format(Config.TokenConvar))
     else
         WebConnect.Log(('HTTP API ready under %s'):format(Config.RoutePrefix))
     end

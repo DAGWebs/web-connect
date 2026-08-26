@@ -1,0 +1,84 @@
+local actions = {}
+
+local function normalizeName(name)
+    return type(name) == 'string' and name:gsub('[^%w_%-]', ''):lower() or nil
+end
+
+local function register(definition, handler, owner)
+    if type(definition) == 'string' then definition = { name = definition } end
+    local name = normalizeName(definition.name)
+    if not name or name == '' or type(handler) ~= 'function' then return false, 'invalid_action' end
+    owner = owner or GetInvokingResource() or GetCurrentResourceName()
+    if actions[name] and actions[name].owner ~= owner then return false, 'action_already_registered' end
+    actions[name] = {
+        name = definition.name,
+        handler = handler,
+        owner = owner,
+        description = definition.description or 'No description provided',
+        usage = definition.usage or definition.name
+    }
+    for _, alias in ipairs(definition.aliases or {}) do actions[normalizeName(alias)] = actions[name] end
+    return true
+end
+
+local function split(value)
+    local result = {}
+    for part in value:gmatch('[^:]+') do result[#result + 1] = part end
+    return result
+end
+
+function WebConnect.ParseAction(value)
+    if type(value) ~= 'string' or #value > 256 then return nil, 'invalid_action_string' end
+    local parts = split(value)
+    if parts[1] and parts[1]:lower() == Config.ActionPrefix:lower() then table.remove(parts, 1) end
+    local name = normalizeName(table.remove(parts, 1))
+    if not name or not actions[name] then return nil, 'unknown_action' end
+    return { name = name, arguments = parts, registration = actions[name] }
+end
+
+function WebConnect.ExecuteAction(value, context)
+    local parsed, reason = WebConnect.ParseAction(value)
+    if not parsed then return { status = 400, error = reason } end
+    context.action = parsed.name
+    context.actionOwner = parsed.registration.owner
+    local ok, result = pcall(parsed.registration.handler, parsed.arguments, context)
+    if not ok then
+        WebConnect.Log(('action %q failed: %s'):format(parsed.name, result))
+        return { status = 500, error = 'action_failed' }
+    end
+    return result or { status = 200, data = { completed = true, action = parsed.name } }
+end
+
+function WebConnect.ListActions()
+    local result, seen = {}, {}
+    for _, action in pairs(actions) do
+        if not seen[action] then
+            seen[action] = true
+            result[#result + 1] = {
+                name = action.name,
+                description = action.description,
+                usage = Config.ActionPrefix .. ':' .. action.usage,
+                owner = action.owner
+            }
+        end
+    end
+    table.sort(result, function(left, right) return left.name:lower() < right.name:lower() end)
+    return result
+end
+
+exports('RegisterAction', function(definition, handler)
+    return register(definition, handler, GetInvokingResource())
+end)
+
+exports('ExecuteAction', function(action, context)
+    return WebConnect.ExecuteAction(action, context or {})
+end)
+exports('GetActions', WebConnect.ListActions)
+
+AddEventHandler('onResourceStop', function(resource)
+    for name, action in pairs(actions) do
+        if action.owner == resource then actions[name] = nil end
+    end
+end)
+
+WebConnect.RegisterAction = register
