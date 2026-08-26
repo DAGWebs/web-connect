@@ -102,11 +102,11 @@ function WebConnect.CountEvents()
 end
 
 for publicName, configured in pairs(Config.Events) do
-    local definition = configured
+    local definition = publicName
     if type(configured) == 'table' then
+        definition = {}
+        for key, value in pairs(configured) do definition[key] = value end
         definition.name = definition.name or publicName
-    else
-        definition = publicName
     end
     local ok, reason = WebConnect.Register(definition, configured, GetCurrentResourceName())
     if not ok then WebConnect.Log(('could not register %q: %s'):format(publicName, reason)) end
@@ -114,8 +114,12 @@ end
 
 exports('RegisterEvent', function(name, event) return WebConnect.Register(name, event, GetInvokingResource()) end)
 exports('RegisterHandler', function(definition, handler)
-    definition.handler = handler
-    return WebConnect.Register(definition, nil, GetInvokingResource())
+    if type(definition) ~= 'table' then return false, 'invalid_definition' end
+    -- Copied rather than mutated: the caller owns the table it passed in.
+    local copy = {}
+    for key, value in pairs(definition) do copy[key] = value end
+    copy.handler = handler
+    return WebConnect.Register(copy, nil, GetInvokingResource())
 end)
 exports('UnregisterEvent', function(name) return WebConnect.UnregisterEvent(name, GetInvokingResource()) end)
 exports('GetRegisteredEvents', WebConnect.ListEvents)

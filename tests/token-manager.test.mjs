@@ -80,8 +80,9 @@ test('an expired token stops authenticating after a restart', async () => {
 
   // Tokens are read at load time, so a restart is the way to observe expiry.
   const restarted = await runtime(stored);
-  assert.equal(restarted.registered.HasBearerTokens(), true, 'the record is still stored');
-  assert.equal(restarted.registered.AuthenticateBearer(secret), null, 'but no longer authenticates');
+  assert.equal(restarted.registered.AuthenticateBearer(secret), null, 'no longer authenticates');
+  assert.equal(restarted.registered.HasBearerTokens(), false, 'and is pruned from the store');
+  assert.match(restarted.logs.join('\n'), /Removed 1 expired token/);
 });
 
 test('last use is recorded in memory and written back on flush', async () => {

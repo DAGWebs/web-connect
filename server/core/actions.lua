@@ -4,14 +4,23 @@ local actions = {}
 -- successfully and then be permanently unreachable over HTTP.
 local reservedNames = { batch = true }
 
-local function normalizeName(name)
-    return type(name) == 'string' and name:gsub('[^%w_%-]', ''):lower() or nil
+-- Lookups only fold case. Stripping unexpected characters instead would mean
+-- `give$Cash` silently resolved to the registered `giveCash`.
+local function lookupKey(name)
+    return type(name) == 'string' and name:lower() or nil
+end
+
+local function validActionName(name)
+    return type(name) == 'string' and name ~= '' and #name <= 64
+        and name:match('^[%w_%-]+$') ~= nil
 end
 
 local function register(definition, handler, owner)
     if type(definition) == 'string' then definition = { name = definition } end
-    local name = normalizeName(definition.name)
-    if not name or name == '' or type(handler) ~= 'function' then return false, 'invalid_action' end
+    if not validActionName(definition.name) or type(handler) ~= 'function' then
+        return false, 'invalid_action'
+    end
+    local name = lookupKey(definition.name)
     if reservedNames[name] then return false, 'reserved_action_name' end
     owner = owner or GetInvokingResource() or GetCurrentResourceName()
     if actions[name] and actions[name].owner ~= owner then return false, 'action_already_registered' end
@@ -23,8 +32,8 @@ local function register(definition, handler, owner)
         usage = definition.usage or definition.name
     }
     for _, alias in ipairs(definition.aliases or {}) do
-        local aliasName = normalizeName(alias)
-        if aliasName and aliasName ~= '' and not reservedNames[aliasName] then
+        local aliasName = validActionName(alias) and lookupKey(alias) or nil
+        if aliasName and not reservedNames[aliasName] then
             actions[aliasName] = actions[name]
         end
     end
@@ -42,7 +51,7 @@ function WebConnect.ParseAction(value)
     if type(value) ~= 'string' or #value > 256 then return nil, 'invalid_action_string' end
     local parts = split(value)
     if parts[1] and parts[1]:lower() == Config.ActionPrefix:lower() then table.remove(parts, 1) end
-    local name = normalizeName(table.remove(parts, 1))
+    local name = lookupKey(table.remove(parts, 1))
     if not name or not actions[name] then return nil, 'unknown_action' end
     return { name = name, arguments = parts, registration = actions[name] }
 end

@@ -54,10 +54,13 @@ local function actionPaths(prefix)
                 requestBody = {
                     required = true,
                     content = { ['application/json'] = { schema = {
-                        type = 'object', required = { 'playerId' },
+                        type = 'object', required = { 'playerId' }, additionalProperties = false,
                         properties = {
                             playerId = { type = 'integer', minimum = 1 },
-                            arguments = { type = 'array', items = { type = { 'string', 'number' } } }
+                            arguments = {
+                                type = 'array', maxItems = 16,
+                                items = { type = { 'string', 'number' } }
+                            }
                         }
                     } } }
                 },

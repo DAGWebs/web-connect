@@ -233,9 +233,11 @@ function harness.new(options)
         return captured
     end
 
+    local issued = 0
     function runtime.authorized(scopes)
-        local secret = 'secret-' .. tostring(#runtime.log) .. tostring(runtime.now)
-        runtime.addToken(secret, { name = 'test', scopes = scopes })
+        issued = issued + 1
+        local secret = ('secret-%d'):format(issued)
+        runtime.addToken(secret, { id = ('token-%d'):format(issued), name = 'test', scopes = scopes })
         return { Authorization = 'Bearer ' .. secret }
     end
 

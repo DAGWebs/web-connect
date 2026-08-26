@@ -3,15 +3,27 @@ const { createHash, randomBytes, timingSafeEqual, randomUUID } = require('node:c
 const RESOURCE = GetCurrentResourceName();
 const TOKEN_FILE = 'data/tokens.json';
 const USAGE_FLUSH_INTERVAL_MS = 30000;
-let tokens = loadTokens();
 let usageDirty = false;
+let tokens = loadTokens();
+
+function isExpired(token) {
+  return Boolean(token.expiresAt) && Date.parse(token.expiresAt) <= Date.now();
+}
 
 function loadTokens() {
   const contents = LoadResourceFile(RESOURCE, TOKEN_FILE);
   if (!contents) return [];
   try {
     const data = JSON.parse(contents);
-    return Array.isArray(data.tokens) ? data.tokens : [];
+    if (!Array.isArray(data.tokens)) return [];
+    // Expired credentials are dropped at load so the file does not accumulate
+    // dead records that still have to be compared against on every request.
+    const live = data.tokens.filter((token) => !isExpired(token));
+    if (live.length !== data.tokens.length) {
+      console.log(`[${RESOURCE}] Removed ${data.tokens.length - live.length} expired token(s).`);
+      usageDirty = true;
+    }
+    return live;
   } catch (error) {
     console.error(`[${RESOURCE}] Could not read ${TOKEN_FILE}: ${error.message}`);
     return [];
@@ -32,11 +44,14 @@ function digest(value) {
 
 function authenticate(value) {
   const candidate = Buffer.from(digest(value), 'hex');
-  const record = tokens.find((item) => {
+  // Every record is compared, so how long the lookup takes does not reveal where
+  // in the file a matching credential sits.
+  let record = null;
+  for (const item of tokens) {
     const stored = Buffer.from(item.hash, 'hex');
-    return stored.length === candidate.length && timingSafeEqual(stored, candidate);
-  });
-  if (!record || (record.expiresAt && Date.parse(record.expiresAt) <= Date.now())) return null;
+    if (stored.length === candidate.length && timingSafeEqual(stored, candidate)) record = item;
+  }
+  if (!record || isExpired(record)) return null;
   // Written back on a timer: persisting here would put a disk write on every
   // authenticated API request.
   record.lastUsedAt = new Date().toISOString();

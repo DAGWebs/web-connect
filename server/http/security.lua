@@ -89,15 +89,27 @@ function WebConnect.Http.HasAnyScope(principal, required)
     return false
 end
 
-function WebConnect.Http.WithinRateLimit(address)
+-- Two buckets. Unauthenticated traffic is limited per address, because that is
+-- the only identity available. Authenticated traffic is limited per credential:
+-- a website's requests all arrive from one backend address, so metering those by
+-- address would cap the entire site at one caller's budget.
+function WebConnect.Http.WithinRateLimit(key, limit)
     local now = os.time()
-    local client = clients[address]
+    local client = clients[key]
     if not client or now - client.startedAt >= Config.RateLimit.windowSeconds then
-        clients[address] = { startedAt = now, requests = 1 }
+        clients[key] = { startedAt = now, requests = 1 }
         return true
     end
     client.requests = client.requests + 1
-    return client.requests <= Config.RateLimit.requests
+    return client.requests <= limit
+end
+
+function WebConnect.Http.WithinAddressRateLimit(address)
+    return WebConnect.Http.WithinRateLimit('address:' .. tostring(address), Config.RateLimit.anonymousRequests)
+end
+
+function WebConnect.Http.WithinPrincipalRateLimit(principal)
+    return WebConnect.Http.WithinRateLimit('principal:' .. tostring(principal.id), Config.RateLimit.requests)
 end
 
 CreateThread(function()

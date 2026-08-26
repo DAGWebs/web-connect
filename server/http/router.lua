@@ -14,11 +14,26 @@ local function reject(response, status, errorCode, id, details)
     WebConnect.Http.Respond(response, status, { error = errorCode, requestId = id, details = details })
 end
 
+local function limitByAddress(response, address, id)
+    if WebConnect.Http.WithinAddressRateLimit(address) then return true end
+    reject(response, 429, 'rate_limit_exceeded', id)
+    return false
+end
+
 -- Returns the principal, or nil after responding with the appropriate failure.
+-- A request that fails to authenticate is metered against its address so that
+-- credentials cannot be guessed at speed; one that succeeds is metered against
+-- the credential it presented.
 local function authorize(request, response, id, scopes)
+    local address = request.address or 'unknown'
     local principal, authError = WebConnect.Http.Authenticate(request.headers)
     if not principal then
+        if not limitByAddress(response, address, id) then return nil end
         reject(response, authError == 'api_not_configured' and 503 or 401, authError, id)
+        return nil
+    end
+    if not WebConnect.Http.WithinPrincipalRateLimit(principal) then
+        reject(response, 429, 'rate_limit_exceeded', id)
         return nil
     end
     if scopes and not WebConnect.Http.HasAnyScope(principal, scopes) then
@@ -30,6 +45,40 @@ end
 
 local function idempotencyKey(request)
     return WebConnect.Http.Header(request.headers, 'idempotency-key')
+end
+
+-- The event API validates payloads against the route schema; the action API had
+-- no equivalent, so `arguments` was whatever JSON happened to contain.
+local ARGUMENTS_SCHEMA = { type = 'array', maxItems = 16, items = { type = { 'string', 'number' } } }
+
+local DIRECT_ACTION_SCHEMA = {
+    type = 'object', required = { 'playerId' }, additionalProperties = false,
+    properties = {
+        playerId = { type = 'integer', minimum = 1 },
+        arguments = ARGUMENTS_SCHEMA
+    }
+}
+
+local function batchSchema()
+    return {
+        type = 'object', required = { 'commands' }, additionalProperties = false,
+        properties = {
+            playerId = { type = 'integer', minimum = 1 },
+            stopOnError = { type = 'boolean' },
+            commands = {
+                type = 'array', minItems = 1, maxItems = Config.MaxBatchActions,
+                items = {
+                    type = 'object', additionalProperties = false,
+                    properties = {
+                        name = { type = 'string', minLength = 1, maxLength = 64 },
+                        action = { type = 'string', minLength = 1, maxLength = 256 },
+                        playerId = { type = 'integer', minimum = 1 },
+                        arguments = ARGUMENTS_SCHEMA
+                    }
+                }
+            }
+        }
+    }
 end
 
 local function actionString(name, arguments)
@@ -63,11 +112,13 @@ SetHttpHandler(function(request, response)
     local path = WebConnect.Http.PathOnly(request.path)
     local address = request.address or 'unknown'
 
-    -- Applied to every route. /health and /openapi.json are unauthenticated, so
-    -- leaving them unmetered would hand out a free amplification target.
-    if not WebConnect.Http.WithinRateLimit(address) then
-        reject(response, 429, 'rate_limit_exceeded', id)
-        return
+    -- The unauthenticated routes below are metered by address; everything else
+    -- is metered inside authorize(). Leaving these unmetered would hand out a
+    -- free amplification target.
+    if request.method == 'GET' and (path == prefix .. '/health'
+        or path == prefix .. '/openapi.json'
+        or path == prefix .. '/docs' or path == prefix .. '/docs/') then
+        if not limitByAddress(response, address, id) then return end
     end
 
     if request.method == 'GET' and path == prefix .. '/health' then
@@ -106,9 +157,11 @@ SetHttpHandler(function(request, response)
             local requestContext = { requestId = id, address = address, apiEvent = 'action:' .. directAction }
             local isBatch = directAction:lower() == 'batch'
 
-            if isBatch and (type(payload.commands) ~= 'table' or #payload.commands < 1
-                or #payload.commands > Config.MaxBatchActions) then
-                reject(response, 422, 'invalid_batch', id)
+            local valid, validationError = WebConnect.Validate(
+                payload, isBatch and batchSchema() or DIRECT_ACTION_SCHEMA
+            )
+            if not valid then
+                reject(response, 422, isBatch and 'invalid_batch' or 'validation_failed', id, validationError)
                 return
             end
 

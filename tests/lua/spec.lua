@@ -137,9 +137,9 @@ end)
 
 -- Rate limiting ------------------------------------------------------------
 
-test('every route is rate limited, including unauthenticated ones', function()
+test('unauthenticated routes are metered per address', function()
     local runtime = harness.new()
-    local limit = runtime.Config.RateLimit.requests
+    local limit = runtime.Config.RateLimit.anonymousRequests
     local last
     for _ = 1, limit do last = runtime.request('GET', '/web-connect/health') end
     equal(last.status, 200, 'within limit')
@@ -150,12 +150,62 @@ test('every route is rate limited, including unauthenticated ones', function()
     equal(runtime.request('GET', '/web-connect/health').status, 200, 'window reset')
 end)
 
-test('the rate limit is per address', function()
+test('the address limit is per address', function()
     local runtime = harness.new()
-    for _ = 1, runtime.Config.RateLimit.requests + 1 do
+    for _ = 1, runtime.Config.RateLimit.anonymousRequests + 1 do
         runtime.request('GET', '/web-connect/health', { address = '198.51.100.1' })
     end
     equal(runtime.request('GET', '/web-connect/health', { address = '198.51.100.2' }).status, 200)
+end)
+
+test('failed authentication is metered per address', function()
+    local runtime = harness.new()
+    local limit = runtime.Config.RateLimit.anonymousRequests
+    local headers = { Authorization = 'Bearer wrong' }
+    runtime.addToken('valid', { name = 'test', scopes = { '*' } })
+    local last
+    for _ = 1, limit do
+        last = runtime.request('POST', '/web-connect/events/announcement', {
+            headers = headers, body = { message = 'x' }
+        })
+    end
+    equal(last.status, 401, 'rejected but still counted')
+    equal(runtime.request('POST', '/web-connect/events/announcement', {
+        headers = headers, body = { message = 'x' }
+    }).status, 429, 'guessing is throttled')
+end)
+
+test('a credential is not capped by the address bucket it shares', function()
+    local runtime = harness.new()
+    local headers = runtime.authorized({ '*' })
+    -- Every request arrives from one backend address, as the README instructs.
+    local last
+    for _ = 1, runtime.Config.RateLimit.anonymousRequests + 5 do
+        last = runtime.request('POST', '/web-connect/events/announcement', {
+            headers = headers, body = { message = 'x' }
+        })
+    end
+    equal(last.status, 202, 'not throttled by the anonymous budget')
+end)
+
+test('a credential is capped by its own budget', function()
+    local runtime = harness.new()
+    local headers = runtime.authorized({ '*' })
+    local last
+    for _ = 1, runtime.Config.RateLimit.requests do
+        last = runtime.request('POST', '/web-connect/events/announcement', {
+            headers = headers, body = { message = 'x' }
+        })
+    end
+    equal(last.status, 202, 'within its budget')
+    equal(runtime.request('POST', '/web-connect/events/announcement', {
+        headers = headers, body = { message = 'x' }
+    }).status, 429, 'over its budget')
+
+    -- A different credential from the same address is unaffected.
+    equal(runtime.request('POST', '/web-connect/events/announcement', {
+        headers = runtime.authorized({ '*' }), body = { message = 'x' }
+    }).status, 202)
 end)
 
 -- Idempotency --------------------------------------------------------------
@@ -599,6 +649,88 @@ test('a framework player who is not loaded is reported distinctly', function()
     runtime.addPlayer(8)
     runtime.WebConnect.RefreshFramework()
     equal(select(2, runtime.WebConnect.AddMoney(8, 'cash', 100)), 'player_not_loaded')
+end)
+
+
+test('the action API validates its payload', function()
+    local runtime = harness.new()
+    runtime.addPlayer(5)
+    local headers = runtime.authorized({ 'action:execute' })
+
+    equal(runtime.request('POST', '/api/givecash', {
+        headers = headers, body = { playerId = 5, arguments = { key = 'value' } }
+    }).status, 422, 'arguments must be an array')
+
+    equal(runtime.request('POST', '/api/givecash', {
+        headers = headers, body = { playerId = 5, arguments = { { nested = true } } }
+    }).status, 422, 'arguments must be scalars')
+
+    equal(runtime.request('POST', '/api/givecash', {
+        headers = headers, body = { playerId = 5, arguments = { 10 }, extra = 'no' }
+    }).status, 422, 'unknown properties are refused')
+
+    equal(runtime.request('POST', '/api/givecash', {
+        headers = headers, body = { arguments = { 10 } }
+    }).status, 422, 'playerId is required')
+end)
+
+test('a batch validates each command', function()
+    local runtime = harness.new()
+    runtime.addPlayer(5)
+    local headers = runtime.authorized({ 'action:execute' })
+
+    equal(runtime.request('POST', '/api/batch', {
+        headers = headers, body = { playerId = 5, commands = { { name = 'giveCash', arguments = 'nope' } } }
+    }).status, 422, 'arguments must be an array')
+
+    equal(runtime.request('POST', '/api/batch', {
+        headers = headers, body = { playerId = 5, commands = {} }
+    }).status, 422, 'at least one command')
+
+    equal(runtime.request('POST', '/api/batch', {
+        headers = headers, body = { playerId = 5 }
+    }).status, 422, 'commands is required')
+end)
+
+test('action names are validated rather than stripped', function()
+    local runtime = harness.new()
+    equal(select(2, runtime.WebConnect.RegisterAction({ name = 'give$Cash' }, function() end)), 'invalid_action')
+    equal(select(2, runtime.WebConnect.RegisterAction({ name = '' }, function() end)), 'invalid_action')
+    -- Punctuation used to be stripped, so this resolved to the registered giveCash.
+    equal(runtime.WebConnect.ExecuteAction('connect:give$Cash:10', { playerId = 1 }).error, 'unknown_action')
+    -- Case is still folded, which is what the lowercase /api/<action> paths rely on.
+    runtime.addPlayer(1)
+    equal(runtime.WebConnect.ExecuteAction('connect:GIVECASH:10', { playerId = 1 }).error, 'money_not_supported')
+end)
+
+test('the schema validates arrays, enums and patterns', function()
+    local runtime = harness.new()
+    local validate = runtime.WebConnect.Validate
+
+    local list = { type = 'array', minItems = 1, maxItems = 2, items = { type = 'integer' } }
+    truthy(validate({ 1, 2 }, list))
+    equal(validate({}, list), false, 'below minItems')
+    equal(validate({ 1, 2, 3 }, list), false, 'above maxItems')
+    equal(validate({ 'a' }, list), false, 'wrong item type')
+    equal(validate({ key = 1 }, list), false, 'not an array')
+
+    truthy(validate('success', { type = 'string', enum = { 'success', 'error' } }))
+    equal(validate('other', { type = 'string', enum = { 'success', 'error' } }), false)
+
+    truthy(validate('AB12', { type = 'string', pattern = '^%u%u%d%d$' }))
+    equal(validate('nope', { type = 'string', pattern = '^%u%u%d%d$' }), false)
+
+    truthy(validate(5, { type = { 'string', 'number' } }), 'union type')
+    truthy(validate('five', { type = { 'string', 'number' } }), 'union type')
+    equal(validate(true, { type = { 'string', 'number' } }), false, 'outside the union')
+end)
+
+test('registering a handler does not mutate the caller definition', function()
+    local runtime = harness.new()
+    local definition = { name = 'typed', summary = 'test' }
+    runtime.exports['web-connect'].RegisterHandler(definition, function() end)
+    equal(definition.handler, nil, 'the caller table is untouched')
+    truthy(runtime.WebConnect.HasEvent('typed'))
 end)
 
 print(('\n%d passed, %d failed'):format(passes, #failures))

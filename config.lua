@@ -19,7 +19,12 @@ Config.MaxBodyBytes = 64 * 1024
 Config.RequestTimeoutMs = 10000
 Config.DocsEnabled = true
 Config.RateLimit = {
-    requests = 30,
+    -- Per credential. A website backend makes every call from one address, so
+    -- this is the budget that matters for normal traffic.
+    requests = 120,
+    -- Per address, for requests that are not authenticated: the health check,
+    -- the documentation routes, and failed authentication attempts.
+    anonymousRequests = 30,
     windowSeconds = 60
 }
 
