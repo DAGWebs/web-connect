@@ -10,4 +10,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y lua5.4
       - run: npm test

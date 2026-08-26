@@ -1,5 +1,9 @@
 local actions = {}
 
+-- `/api/batch` is the batch endpoint, so an action of that name would register
+-- successfully and then be permanently unreachable over HTTP.
+local reservedNames = { batch = true }
+
 local function normalizeName(name)
     return type(name) == 'string' and name:gsub('[^%w_%-]', ''):lower() or nil
 end
@@ -8,6 +12,7 @@ local function register(definition, handler, owner)
     if type(definition) == 'string' then definition = { name = definition } end
     local name = normalizeName(definition.name)
     if not name or name == '' or type(handler) ~= 'function' then return false, 'invalid_action' end
+    if reservedNames[name] then return false, 'reserved_action_name' end
     owner = owner or GetInvokingResource() or GetCurrentResourceName()
     if actions[name] and actions[name].owner ~= owner then return false, 'action_already_registered' end
     actions[name] = {
@@ -17,7 +22,13 @@ local function register(definition, handler, owner)
         description = definition.description or 'No description provided',
         usage = definition.usage or definition.name
     }
-    for _, alias in ipairs(definition.aliases or {}) do actions[normalizeName(alias)] = actions[name] end
+    for _, alias in ipairs(definition.aliases or {}) do
+        local aliasName = normalizeName(alias)
+        if aliasName and aliasName ~= '' and not reservedNames[aliasName] then
+            actions[aliasName] = actions[name]
+        end
+    end
+    WebConnect.BumpRevision()
     return true
 end
 
@@ -54,7 +65,7 @@ function WebConnect.ExecuteAction(value, context)
     end
     result = result or { status = 200, data = { completed = true, action = parsed.name } }
     WebConnect.RecordAudit({
-        action = parsed.name,
+        action = parsed.registration.name,
         arguments = parsed.arguments,
         playerId = context.playerId,
         actor = context.principal,
@@ -92,9 +103,14 @@ end)
 exports('GetActions', WebConnect.ListActions)
 
 AddEventHandler('onResourceStop', function(resource)
+    local removed = false
     for name, action in pairs(actions) do
-        if action.owner == resource then actions[name] = nil end
+        if action.owner == resource then
+            actions[name] = nil
+            removed = true
+        end
     end
+    if removed then WebConnect.BumpRevision() end
 end)
 
 WebConnect.RegisterAction = register

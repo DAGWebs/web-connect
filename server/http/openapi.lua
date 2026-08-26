@@ -75,7 +75,9 @@ local function actionPaths(prefix)
     return paths
 end
 
-function WebConnect.Http.OpenApi(prefix)
+local cachedRevision, cachedPrefix, cachedDocument
+
+local function buildDocument(prefix)
     local paths = eventPaths(prefix)
     for path, operation in pairs(actionPaths(Config.ActionApiPrefix:gsub('/+$', ''))) do paths[path] = operation end
     paths[prefix .. '/health'] = {
@@ -108,6 +110,20 @@ function WebConnect.Http.OpenApi(prefix)
             }
         }
     }
+end
+
+-- The document only changes when an event or action is registered or removed,
+-- so it is rebuilt on registry changes rather than on every unauthenticated
+-- request to /openapi.json.
+function WebConnect.Http.OpenApi(prefix)
+    local revision = WebConnect.Revision()
+    if cachedDocument and cachedRevision == revision and cachedPrefix == prefix then
+        return cachedDocument
+    end
+    cachedDocument = buildDocument(prefix)
+    cachedRevision = revision
+    cachedPrefix = prefix
+    return cachedDocument
 end
 
 function WebConnect.Http.ScalarPage(prefix)

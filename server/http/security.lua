@@ -1,5 +1,13 @@
 local clients = {}
 
+-- Scopes are canonically `event:<name>` and `action:execute`. `events:*` was
+-- documented as the grant-everything event scope in earlier versions, so it is
+-- accepted as an alias for `event:*` rather than silently authorising nothing.
+local scopeAliases = {
+    ['events:*'] = 'event:*',
+    ['events:'] = 'event:'
+}
+
 local function secureEquals(left, right)
     if type(left) ~= 'string' or type(right) ~= 'string' then return false end
     local different = #left ~ #right
@@ -9,8 +17,18 @@ local function secureEquals(left, right)
     return different == 0
 end
 
+-- FiveM does not normalise header casing, so look the name up case-insensitively.
+function WebConnect.Http.Header(headers, name)
+    if type(headers) ~= 'table' then return nil end
+    local wanted = name:lower()
+    for key, value in pairs(headers) do
+        if type(key) == 'string' and key:lower() == wanted then return value end
+    end
+    return nil
+end
+
 local function bearerToken(headers)
-    local value = (headers or {}).authorization or (headers or {}).Authorization
+    local value = WebConnect.Http.Header(headers, 'authorization')
     return type(value) == 'string' and value:match('^[Bb]earer%s+(.+)$') or nil
 end
 
@@ -43,10 +61,30 @@ function WebConnect.Http.TokenConfigured()
     return ok and value or false
 end
 
+function WebConnect.Http.NormalizeScope(scope)
+    if type(scope) ~= 'string' then return nil end
+    return scopeAliases[scope] or scope
+end
+
 function WebConnect.Http.HasScope(principal, required)
-    for _, held in ipairs(principal.scopes or {}) do
-        if held == '*' or held == required then return true end
-        if held:sub(-1) == '*' and required:sub(1, #held - 1) == held:sub(1, -2) then return true end
+    required = WebConnect.Http.NormalizeScope(required)
+    if not required then return false end
+    for _, granted in ipairs((principal or {}).scopes or {}) do
+        local held = WebConnect.Http.NormalizeScope(granted)
+        if held then
+            if held == '*' or held == required then return true end
+            -- `a:*` grants every scope beginning with `a:`.
+            if held:sub(-1) == '*' and required:sub(1, #held - 1) == held:sub(1, -2) then return true end
+        end
+    end
+    return false
+end
+
+-- A route may declare several acceptable scopes; holding any one is enough.
+function WebConnect.Http.HasAnyScope(principal, required)
+    if type(required) ~= 'table' or #required == 0 then return true end
+    for _, scope in ipairs(required) do
+        if WebConnect.Http.HasScope(principal, scope) then return true end
     end
     return false
 end

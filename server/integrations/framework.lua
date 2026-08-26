@@ -127,10 +127,22 @@ function WebConnect.Notify(source, message, notificationType, duration)
     return true
 end
 
-function WebConnect.AddMoney(source, account, amount, reason)
+-- An online player with no framework object means one of two different things:
+-- a standalone server has no economy/inventory at all, while on a framework the
+-- player record simply is not loaded yet. Reporting both as `player_not_found`
+-- told the caller the player was offline when they were not.
+local function frameworkPlayer(source, unsupported)
     local wrapped = WebConnect.GetPlayer(source)
-    if not wrapped or not wrapped.object then return false, 'player_not_found' end
-    local player = wrapped.object
+    if not wrapped then return nil, 'player_not_found' end
+    if not wrapped.object then
+        return nil, selected == 'standalone' and unsupported or 'player_not_loaded'
+    end
+    return wrapped.object
+end
+
+function WebConnect.AddMoney(source, account, amount, reason)
+    local player, reasonCode = frameworkPlayer(source, 'money_not_supported')
+    if not player then return false, reasonCode end
 
     if selected == 'esx' then
         if account == 'cash' then player.addMoney(amount, reason)
@@ -139,43 +151,51 @@ function WebConnect.AddMoney(source, account, amount, reason)
     end
     if selected == 'qbcore' or selected == 'qbus' or selected == 'qbox' then
         if player.Functions and player.Functions.AddMoney then
-            return player.Functions.AddMoney(account, amount, reason) ~= false, 'money_rejected'
+            if player.Functions.AddMoney(account, amount, reason) == false then
+                return false, 'money_rejected'
+            end
+            return true
         end
         return false, 'money_not_supported'
     end
     if selected == 'vrp' and player.userId and account == 'cash' then
         local ok = pcall(function() exports.vrp:giveMoney(player.userId, amount) end)
-        return ok, ok and nil or 'money_not_supported'
+        if not ok then return false, 'money_not_supported' end
+        return true
     end
     return false, 'money_not_supported'
 end
 
 function WebConnect.AddItem(source, item, amount)
-    local wrapped = WebConnect.GetPlayer(source)
-    if not wrapped or not wrapped.object then return false, 'player_not_found' end
-    local player = wrapped.object
+    local player, reasonCode = frameworkPlayer(source, 'inventory_not_supported')
+    if not player then return false, reasonCode end
     if selected == 'esx' and player.addInventoryItem then
         player.addInventoryItem(item, amount)
         return true
     end
     if (selected == 'qbcore' or selected == 'qbus' or selected == 'qbox')
         and player.Functions and player.Functions.AddItem then
-        return player.Functions.AddItem(item, amount) ~= false, 'inventory_rejected'
+        if player.Functions.AddItem(item, amount) == false then
+            return false, 'inventory_rejected'
+        end
+        return true
     end
     return false, 'inventory_not_supported'
 end
 
 function WebConnect.SetJob(source, job, grade)
-    local wrapped = WebConnect.GetPlayer(source)
-    if not wrapped or not wrapped.object then return false, 'player_not_found' end
-    local player = wrapped.object
+    local player, reasonCode = frameworkPlayer(source, 'job_not_supported')
+    if not player then return false, reasonCode end
     if selected == 'esx' and player.setJob then
         player.setJob(job, grade)
         return true
     end
     if (selected == 'qbcore' or selected == 'qbus' or selected == 'qbox')
         and player.Functions and player.Functions.SetJob then
-        return player.Functions.SetJob(job, grade) ~= false, 'job_rejected'
+        if player.Functions.SetJob(job, grade) == false then
+            return false, 'job_rejected'
+        end
+        return true
     end
     return false, 'job_not_supported'
 end

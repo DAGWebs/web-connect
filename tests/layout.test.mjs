@@ -2,45 +2,35 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('manifest loads dependencies before router', async () => {
+// Load order is a property of the manifest itself, so it is checked statically.
+// Everything else about these modules is covered by tests/lua/spec.lua.
+test('the manifest loads every module in dependency order', async () => {
   const manifest = await readFile('fxmanifest.lua', 'utf8');
-  const modules = ['server/core/schema.lua', 'server/core/registry.lua', 'server/http/security.lua', 'server/http/openapi.lua', 'server/http/router.lua'];
-  const positions = modules.map((name) => manifest.indexOf(name));
-  assert.ok(positions.every((position) => position >= 0));
+  const order = [
+    'server/core/namespace.lua',
+    'server/core/schema.lua',
+    'server/integrations/framework.lua',
+    'server/core/registry.lua',
+    'server/core/audit.lua',
+    'server/core/actions.lua',
+    'server/integrations/actions.lua',
+    'server/http/security.lua',
+    'server/http/request.lua',
+    'server/http/openapi.lua',
+    'server/http/router.lua',
+  ];
+  const positions = order.map((name) => manifest.indexOf(name));
+  assert.ok(positions.every((position) => position >= 0), 'every module is listed');
   assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
 });
 
-test('OpenAPI and Scalar are exposed', async () => {
-  const openapi = await readFile('server/http/openapi.lua', 'utf8');
-  assert.match(openapi, /openapi = '3\.1\.0'/);
-  assert.match(openapi, /@scalar\/api-reference/);
-});
-
-test('action engine is loaded before built-in action adapters', async () => {
+test('config.lua is loaded before the modules that read it', async () => {
   const manifest = await readFile('fxmanifest.lua', 'utf8');
-  assert.ok(manifest.indexOf('server/core/actions.lua') < manifest.indexOf('server/integrations/actions.lua'));
-  const actions = await readFile('server/integrations/actions.lua', 'utf8');
-  assert.match(actions, /giveCash/);
-  assert.match(actions, /giveItem/);
-  assert.match(actions, /setJob/);
-  assert.match(actions, /kick/);
-  assert.match(actions, /giveCar|ActionConnectors/);
-  assert.match(actions, /RegisterCommand\('connect'/);
+  assert.ok(manifest.indexOf('config.lua') < manifest.indexOf('server/core/registry.lua'));
 });
 
-test('HTTP action catalog is available to authenticated callers', async () => {
-  const router = await readFile('server/http/router.lua', 'utf8');
-  assert.match(router, /'\/actions'/);
-  assert.match(router, /WebConnect\.ListActions/);
-});
-
-test('direct and batch API actions are audited', async () => {
-  const router = await readFile('server/http/router.lua', 'utf8');
-  const audit = await readFile('server/core/audit.lua', 'utf8');
-  const actions = await readFile('server/integrations/actions.lua', 'utf8');
-  assert.match(router, /ActionApiPrefix/);
-  assert.match(router, /directAction:lower\(\) == 'batch'/);
-  assert.match(router, /IdempotencyLookup/);
-  assert.match(audit, /data\/audit\.json/);
-  assert.match(actions, /subcommand == 'logs'/);
+test('the token store is never committed', async () => {
+  const ignore = await readFile('.gitignore', 'utf8');
+  assert.match(ignore, /^data\/tokens\.json$/m);
+  assert.match(ignore, /^data\/audit\.json$/m);
 });

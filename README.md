@@ -30,7 +30,9 @@ server/init.lua                Startup checks
 server/token-manager.js        Secure token generation and persistence
 data/                          Runtime token storage (secret is git-ignored)
 examples/                      Copyable integration examples
-tests/                         Automated Node/runtime contract tests
+tests/lua/harness.lua          FiveM natives stubbed for tests
+tests/lua/spec.lua             Behavioural tests for the Lua resource
+tests/*.test.mjs               Node test runner entry points
 ```
 
 The manifest lists modules explicitly in dependency order. HTTP concerns,
@@ -57,10 +59,10 @@ features do not require growing a single server file.
 From the server console, run:
 
 ```text
-webconnect_token create website events:*,action:execute
+webconnect_token create website event:*,action:execute
 ```
 
-An authorized administrator can also run `/webconnect_token create website events:*,action:execute`
+An authorized administrator can also run `/webconnect_token create website event:*,action:execute`
 in game.
 Grant access to the restricted command in `server.cfg`:
 
@@ -69,9 +71,11 @@ add_ace group.admin command.webconnect_token allow
 ```
 
 The command uses Node's cryptographic random generator to create a 256-bit token,
-stores only its SHA-256 hash in `data/tokens.json`, and shows the secret only once
-to the command issuer. The file is git-ignored; protect it like any credential
-database and include it in secure backups.
+stores only its SHA-256 hash in `data/tokens.json`, and prints the secret once, to
+the **server console**. Chat messages pass through the chat resource, where other
+scripts routinely log or echo them, so an administrator who runs the command in
+game is told to read the secret from the console. The file is git-ignored; protect
+it like any credential database and include it in secure backups.
 
 Create narrowly scoped credentials for separate integrations, then list or revoke
 them without affecting other callers:
@@ -83,8 +87,20 @@ webconnect_token list
 webconnect_token revoke race-site
 ```
 
-The `events:*` or `*` scope grants access to every registered event. Prefer
-individual `event:<public-name>` scopes whenever possible.
+`list` shows each credential's id, name, scopes, and when it was last used. Last-use
+timestamps are written back on a timer rather than on every request, so the value
+can lag by up to thirty seconds.
+
+Scopes are `event:<public-name>` for events and `action:execute` for the action
+API. A trailing `*` grants everything below that prefix, so `event:*` covers every
+registered event and `*` covers the whole API. Prefer individual
+`event:<public-name>` scopes whenever possible.
+
+`events:*` (plural) was previously documented as the grant-everything event scope
+but never matched the singular `event:<name>` scopes the router requires, so
+tokens created with it were rejected on every event route. It is now accepted as
+an alias for `event:*`; existing tokens keep working, but new ones should use
+`event:*`.
 
 The `web_connect_token` convar remains supported as an unrestricted legacy key.
 Remove it after migrating the website to scoped saved credentials.
@@ -180,6 +196,9 @@ The ACE-restricted command shows the timestamp, API credential or administrator,
 target player, action, HTTP-style status, and error. Logs are capped and persisted
 to the git-ignored `data/audit.json`; every action, failed action, token-management
 operation, and log/list access also emits `web-connect:audit` for external logging.
+Entries are held in memory and flushed to disk every five seconds and on resource
+stop, so a busy API does not put a synchronous write on the main thread per request.
+Call `exports['web-connect']:FlushAudit()` to force a write.
 
 Common actions included by default:
 
@@ -195,8 +214,11 @@ Common actions included by default:
 | `/connect 42 kick Maintenance` | Disconnects the player with a reason |
 
 Economy, inventory, and job actions return an explicit `*_not_supported` error
-when the selected framework lacks a compatible operation. Configure or register a
-custom action rather than silently changing a database table.
+when the selected framework lacks a compatible operation — including on standalone,
+where there is no economy at all. If the player is online but the framework has not
+finished loading their record, the error is `player_not_loaded`; `player_not_found`
+means the server ID is not connected. Configure or register a custom action rather
+than silently changing a database table.
 
 Grant the restricted command with:
 
@@ -246,6 +268,9 @@ Idempotency-Key: purchase-8291
 }
 ```
 
+`batch` is a reserved action name so the endpoint cannot be shadowed; registering
+an action called `batch` fails with `reserved_action_name`.
+
 Commands may alternatively provide a full string such as
 `{"action":"connect:giveBank:5000"}`. Batches execute sequentially and return
 HTTP `207` when any command fails. They are not database transactions: an earlier
@@ -273,7 +298,10 @@ It is declared without hard-coding VMS logic into the action engine:
 ```
 
 Available placeholders are `$source`, `$playerId`, `$plate`, and `$arg1` through
-`$arg9`. Literal values such as `vehicle` pass through unchanged. The default
+`$arg9`. Literal values such as `vehicle` pass through unchanged. A request that
+does not supply an argument the template references is rejected with
+`missing_action_arguments`, so the target script is never called with a short
+argument list. The default
 connector calls a server export; set `kind = 'serverEvent'` or
 `kind = 'clientEvent'` with an `event` field for scripts that expose events.
 
@@ -405,8 +433,11 @@ end)
 A handler may instead call the third `done(status, data, error)` argument later.
 Requests time out automatically, and every response includes a `requestId` that
 also appears in the handler context and `web-connect:requestCompleted` audit event.
-For operations that must not run twice, send an `Idempotency-Key` header. Completed
-responses are replayed and concurrent duplicates are rejected for five minutes.
+For operations that must not run twice, send an `Idempotency-Key` header. Successful
+responses are replayed and concurrent duplicates are rejected for five minutes. A
+request that failed is not cached, so the same key can be retried once the caller
+has corrected it. A partially successful batch (`207`) *is* cached, because some of
+its commands did take effect.
 
 ## Configuration
 
@@ -428,7 +459,26 @@ responses are replayed and concurrent duplicates are rejected for five minutes.
 | `RateLimit` | 30 requests / 60 seconds | Per-address request limit |
 | `Events` | examples | Explicit public event allow-list |
 
-The in-memory rate limiter resets on resource restart. For an internet-facing
-production deployment, also enforce TLS, request limits, and IP rules at a reverse
-proxy. Do not use a client event as the direct API target; let a validated server
+The rate limit applies to every route, including the unauthenticated `/health`,
+`/openapi.json`, and `/docs` endpoints. The OpenAPI document is rebuilt only when an
+event or action is registered or removed, so repeated documentation requests do not
+re-serialise it. The in-memory rate limiter resets on resource restart. For an
+internet-facing production deployment, also enforce TLS, request limits, and IP
+rules at a reverse proxy. Do not use a client event as the direct API target; let a validated server
 handler decide whether and what to broadcast.
+
+## Development
+
+The behavioural suite loads the real resource modules into a Lua interpreter with
+FiveM's natives replaced by controllable stubs, then drives them through the actual
+HTTP handler. It covers authentication, scope matching, rate limiting, idempotency,
+schema validation, body handling, the action and batch APIs, connector argument
+substitution, audit recording, and the framework adapters.
+
+```bash
+sudo apt-get install -y lua5.4   # or the equivalent for your platform
+npm test
+```
+
+`npm test` runs both the Node tests and the Lua suite, and fails if no Lua
+interpreter is available.

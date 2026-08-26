@@ -38,6 +38,7 @@ function WebConnect.Register(definition, serverEvent, owner)
     local existing = routes[route.name]
     if existing and existing.owner ~= route.owner then return false, 'event_already_registered' end
     routes[route.name] = route
+    WebConnect.BumpRevision()
     TriggerEvent('web-connect:eventRegistered', route.name, route.owner)
     return true
 end
@@ -48,6 +49,7 @@ function WebConnect.UnregisterEvent(publicName, owner)
     if not existing then return false, 'event_not_registered' end
     if existing.owner ~= owner then return false, 'not_event_owner' end
     routes[publicName] = nil
+    WebConnect.BumpRevision()
     TriggerEvent('web-connect:eventUnregistered', publicName, owner)
     return true
 end
@@ -125,7 +127,12 @@ end)
 
 AddEventHandler('onResourceStop', function(resource)
     if resource == GetCurrentResourceName() then return end
+    local removed = false
     for name, route in pairs(routes) do
-        if route.owner == resource then routes[name] = nil end
+        if route.owner == resource then
+            routes[name] = nil
+            removed = true
+        end
     end
+    if removed then WebConnect.BumpRevision() end
 end)

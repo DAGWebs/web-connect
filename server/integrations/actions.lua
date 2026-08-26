@@ -77,10 +77,20 @@ WebConnect.RegisterAction({
     return { status = 200, data = { kicked = true } }
 end)
 
+local plateLetters = 'ABCDEFGHIJKLMNPQRSTUVWXYZ'
+
 local function randomPlate()
-    return ('WEB%05d'):format(math.random(0, 99999))
+    local prefix = {}
+    for index = 1, 3 do
+        local position = math.random(1, #plateLetters)
+        prefix[index] = plateLetters:sub(position, position)
+    end
+    return ('%s%05d'):format(table.concat(prefix), math.random(0, 99999))
 end
 
+-- Returns the substituted values plus their count. A missing `$argN` must be
+-- reported rather than left as a nil hole: `table.unpack` would then stop at the
+-- hole and silently call the target script with the wrong arity.
 local function connectorArguments(template, arguments, context)
     local result = {}
     for index, value in ipairs(template) do
@@ -89,10 +99,16 @@ local function connectorArguments(template, arguments, context)
         elseif value == '$plate' then result[index] = randomPlate()
         else
             local argumentIndex = type(value) == 'string' and value:match('^%$arg(%d)$')
-            result[index] = argumentIndex and arguments[tonumber(argumentIndex)] or value
+            if argumentIndex then
+                local supplied = arguments[tonumber(argumentIndex)]
+                if supplied == nil then return nil, 'missing_action_arguments' end
+                result[index] = supplied
+            else
+                result[index] = value
+            end
         end
     end
-    return result
+    return result, #template
 end
 
 for _, connector in ipairs(Config.ActionConnectors) do
@@ -110,17 +126,21 @@ for _, connector in ipairs(Config.ActionConnectors) do
         if connector.resource and GetResourceState(connector.resource) ~= 'started' then
             return { status = 503, error = 'integration_unavailable' }
         end
-        local values = connectorArguments(connector.arguments, arguments, context)
+        local values, count = connectorArguments(connector.arguments, arguments, context)
+        if not values then return { status = 422, error = count } end
         if connector.kind == 'serverEvent' then
-            TriggerEvent(connector.event, table.unpack(values))
+            TriggerEvent(connector.event, table.unpack(values, 1, count))
             return { status = 202, data = { accepted = true } }
         end
         if connector.kind == 'clientEvent' then
-            TriggerClientEvent(connector.event, context.playerId, table.unpack(values))
+            TriggerClientEvent(connector.event, context.playerId, table.unpack(values, 1, count))
             return { status = 202, data = { accepted = true } }
         end
+        -- FiveM's export proxy always consumes a `self` argument, so the target
+        -- has to be passed explicitly; dot-calling it silently drops $source.
         local ok, result = pcall(function()
-            return exports[connector.resource][connector.export](table.unpack(values))
+            local target = exports[connector.resource]
+            return target[connector.export](target, table.unpack(values, 1, count))
         end)
         if not ok then
             WebConnect.Log(('%s:%s failed: %s'):format(connector.resource, connector.export, result))
@@ -151,23 +171,26 @@ WebConnect.Register({
 
 RegisterCommand('connect', function(source, arguments)
     local subcommand = (arguments[1] or ''):lower()
+    local actor = source == 0
+        and { id = 'console', name = 'console' }
+        or { id = ('player:%d'):format(source), name = GetPlayerName(source) or ('player:%d'):format(source) }
     local function reply(message)
         if source == 0 then WebConnect.Log(message)
         else TriggerClientEvent('chat:addMessage', source, { args = { 'WEB CONNECT', message } }) end
     end
     if subcommand == 'logs' then
         for _, entry in ipairs(WebConnect.GetAuditEntries(arguments[2])) do
-            local actor = entry.actor and (entry.actor.name or entry.actor.id) or 'unknown'
+            local entryActor = entry.actor and (entry.actor.name or entry.actor.id) or 'unknown'
             reply(('%s | %s | player %s | %s | HTTP %s%s'):format(
                 entry.timestamp,
-                actor,
+                entryActor,
                 entry.playerId or '-',
                 entry.action or '-',
                 entry.status or '-',
                 entry.error and (' | ' .. entry.error) or ''
             ))
         end
-        WebConnect.RecordAudit({ action = 'admin:logs', actor = { name = source == 0 and 'console' or GetPlayerName(source) }, status = 200 })
+        WebConnect.RecordAudit({ action = 'admin:logs', actor = actor, status = 200 })
         return
     end
     if subcommand == 'help' or subcommand == 'list' or subcommand == '' then
@@ -176,17 +199,17 @@ RegisterCommand('connect', function(source, arguments)
         for _, action in ipairs(WebConnect.ListActions()) do
             reply(('%s - %s'):format(action.usage, action.description))
         end
-        WebConnect.RecordAudit({ action = 'admin:list', actor = { name = source == 0 and 'console' or GetPlayerName(source) }, status = 200 })
+        WebConnect.RecordAudit({ action = 'admin:list', actor = actor, status = 200 })
         return
     end
     local playerId = math.tointeger(tonumber(table.remove(arguments, 1)))
     if not playerId or not WebConnect.GetPlayer(playerId) then
-        WebConnect.RecordAudit({ action = table.concat(arguments, ':'), playerId = playerId, actor = { name = source == 0 and 'console' or GetPlayerName(source) }, status = 404, error = 'player_not_found' })
+        WebConnect.RecordAudit({ action = table.concat(arguments, ':'), playerId = playerId, actor = actor, status = 404, error = 'player_not_found' })
         reply('Failed: player_not_found')
         return
     end
     local action = Config.ActionPrefix .. ':' .. table.concat(arguments, ':')
-    local result = WebConnect.ExecuteAction(action, { playerId = playerId, source = playerId, principal = { name = 'command' } })
+    local result = WebConnect.ExecuteAction(action, { playerId = playerId, source = playerId, principal = actor })
     local message = result.error and ('Failed: ' .. result.error) or 'Action completed.'
     reply(message)
 end, true)

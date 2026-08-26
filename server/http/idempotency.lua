@@ -15,8 +15,16 @@ function WebConnect.Http.IdempotencyLookup(principal, eventName, key)
     return id, nil
 end
 
+-- Only successful outcomes are replayed. Caching a failure would pin the key to
+-- an error for the rest of the window, so a caller could never retry a request
+-- that never took effect in the first place.
 function WebConnect.Http.IdempotencyFinish(id, status, body)
-    if id then entries[id] = { status = status, body = body, expiresAt = os.time() + ttlSeconds } end
+    if not id then return end
+    if (status or 500) >= 400 then
+        entries[id] = nil
+        return
+    end
+    entries[id] = { status = status, body = body, expiresAt = os.time() + ttlSeconds }
 end
 
 CreateThread(function()

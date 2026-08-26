@@ -3,7 +3,7 @@ game 'gta5'
 
 author 'web-connect contributors'
 description 'Authenticated HTTP bridge for triggering allow-listed FiveM server events'
-version '2.3.0'
+version '2.4.0'
 
 server_only 'yes'
 

@@ -14,6 +14,24 @@ local function reject(response, status, errorCode, id, details)
     WebConnect.Http.Respond(response, status, { error = errorCode, requestId = id, details = details })
 end
 
+-- Returns the principal, or nil after responding with the appropriate failure.
+local function authorize(request, response, id, scopes)
+    local principal, authError = WebConnect.Http.Authenticate(request.headers)
+    if not principal then
+        reject(response, authError == 'api_not_configured' and 503 or 401, authError, id)
+        return nil
+    end
+    if scopes and not WebConnect.Http.HasAnyScope(principal, scopes) then
+        reject(response, 403, 'insufficient_scope', id)
+        return nil
+    end
+    return principal
+end
+
+local function idempotencyKey(request)
+    return WebConnect.Http.Header(request.headers, 'idempotency-key')
+end
+
 local function actionString(name, arguments)
     local parts = { Config.ActionPrefix, name }
     for _, value in ipairs(arguments or {}) do
@@ -43,6 +61,14 @@ end
 SetHttpHandler(function(request, response)
     local id = requestId()
     local path = WebConnect.Http.PathOnly(request.path)
+    local address = request.address or 'unknown'
+
+    -- Applied to every route. /health and /openapi.json are unauthenticated, so
+    -- leaving them unmetered would hand out a free amplification target.
+    if not WebConnect.Http.WithinRateLimit(address) then
+        reject(response, 429, 'rate_limit_exceeded', id)
+        return
+    end
 
     if request.method == 'GET' and path == prefix .. '/health' then
         WebConnect.Http.Respond(response, 200, {
@@ -63,47 +89,39 @@ SetHttpHandler(function(request, response)
     end
 
     if request.method == 'GET' and path == prefix .. '/actions' then
-        local principal, authError = WebConnect.Http.Authenticate(request.headers)
-        if not principal then
-            reject(response, authError == 'api_not_configured' and 503 or 401, authError, id)
-            return
-        end
-        if not WebConnect.Http.HasScope(principal, 'action:execute') then
-            reject(response, 403, 'insufficient_scope', id)
-            return
-        end
+        local principal = authorize(request, response, id, { 'action:execute' })
+        if not principal then return end
         WebConnect.Http.Respond(response, 200, { data = WebConnect.ListActions(), requestId = id })
         return
     end
 
     local directAction = path:match('^' .. escapedActionPrefix .. '/([%w_-]+)$')
     if request.method == 'POST' and directAction then
-        local address = request.address or 'unknown'
-        if not WebConnect.Http.WithinRateLimit(address) then reject(response, 429, 'rate_limit_exceeded', id) return end
-        local principal, authError = WebConnect.Http.Authenticate(request.headers)
-        if not principal then reject(response, authError == 'api_not_configured' and 503 or 401, authError, id) return end
-        if not WebConnect.Http.HasScope(principal, 'action:execute') then reject(response, 403, 'insufficient_scope', id) return end
+        local principal = authorize(request, response, id, { 'action:execute' })
+        if not principal then return end
 
         WebConnect.Http.ReadBody(request, response, function(raw)
             local payload = WebConnect.Http.DecodeObject(raw)
             if not payload then reject(response, 400, 'invalid_json', id) return end
             local requestContext = { requestId = id, address = address, apiEvent = 'action:' .. directAction }
+            local isBatch = directAction:lower() == 'batch'
 
-            if directAction:lower() == 'batch' then
-                if type(payload.commands) ~= 'table' or #payload.commands < 1
-                    or #payload.commands > Config.MaxBatchActions then
-                    reject(response, 422, 'invalid_batch', id)
-                    return
-                end
-                local headers = request.headers or {}
-                local idempotencyId, cached = WebConnect.Http.IdempotencyLookup(
-                    principal, 'api:batch', headers['idempotency-key'] or headers['Idempotency-Key']
-                )
-                if cached then
-                    if cached.pending then reject(response, 409, 'request_in_progress', id) return end
-                    WebConnect.Http.Respond(response, cached.status, cached.body)
-                    return
-                end
+            if isBatch and (type(payload.commands) ~= 'table' or #payload.commands < 1
+                or #payload.commands > Config.MaxBatchActions) then
+                reject(response, 422, 'invalid_batch', id)
+                return
+            end
+
+            local idempotencyId, cached = WebConnect.Http.IdempotencyLookup(
+                principal, 'api:' .. (isBatch and 'batch' or directAction), idempotencyKey(request)
+            )
+            if cached then
+                if cached.pending then reject(response, 409, 'request_in_progress', id) return end
+                WebConnect.Http.Respond(response, cached.status, cached.body)
+                return
+            end
+
+            if isBatch then
                 local results, status = {}, 200
                 for index, command in ipairs(payload.commands) do
                     local result = runApiAction(command, payload.playerId, principal, requestContext)
@@ -117,15 +135,6 @@ SetHttpHandler(function(request, response)
                 return
             end
 
-            local headers = request.headers or {}
-            local idempotencyId, cached = WebConnect.Http.IdempotencyLookup(
-                principal, 'api:' .. directAction, headers['idempotency-key'] or headers['Idempotency-Key']
-            )
-            if cached then
-                if cached.pending then reject(response, 409, 'request_in_progress', id) return end
-                WebConnect.Http.Respond(response, cached.status, cached.body)
-                return
-            end
             local result = runApiAction({
                 name = directAction,
                 arguments = payload.arguments,
@@ -143,19 +152,15 @@ SetHttpHandler(function(request, response)
     local publicName = path:match('^' .. escapedPrefix .. '/events/([%w_-]+)$')
     if request.method ~= 'POST' or not publicName then reject(response, 404, 'not_found', id) return end
 
-    local address = request.address or 'unknown'
-    if not WebConnect.Http.WithinRateLimit(address) then reject(response, 429, 'rate_limit_exceeded', id) return end
-
-    local principal, authError = WebConnect.Http.Authenticate(request.headers)
-    if not principal then
-        reject(response, authError == 'api_not_configured' and 503 or 401, authError, id)
-        return
-    end
+    local principal = authorize(request, response, id)
+    if not principal then return end
 
     local route = WebConnect.GetRoute(publicName)
     if not route then reject(response, 404, 'unknown_event', id) return end
-    local requiredScope = route.scopes[1] or ('event:' .. publicName)
-    if not WebConnect.Http.HasScope(principal, requiredScope) then reject(response, 403, 'insufficient_scope', id) return end
+    if not WebConnect.Http.HasAnyScope(principal, route.scopes) then
+        reject(response, 403, 'insufficient_scope', id)
+        return
+    end
 
     WebConnect.Http.ReadBody(request, response, function(raw)
         local payload = WebConnect.Http.DecodeObject(raw)
@@ -163,11 +168,8 @@ SetHttpHandler(function(request, response)
         local valid, validationError = WebConnect.Validate(payload, route.schema)
         if not valid then reject(response, 422, 'validation_failed', id, validationError) return end
 
-        local headers = request.headers or {}
         local idempotencyId, cached = WebConnect.Http.IdempotencyLookup(
-            principal,
-            publicName,
-            headers['idempotency-key'] or headers['Idempotency-Key']
+            principal, publicName, idempotencyKey(request)
         )
         if cached then
             if cached.pending then reject(response, 409, 'request_in_progress', id) return end
@@ -179,9 +181,11 @@ SetHttpHandler(function(request, response)
             requestId = id, address = address, apiEvent = publicName,
             framework = WebConnect.FrameworkName(), principal = { id = principal.id, name = principal.name }
         }
-        local startedAt = os.clock()
+        -- GetGameTimer is elapsed milliseconds; os.clock would report consumed
+        -- CPU time, which is ~0 for a handler that completes asynchronously.
+        local startedAt = GetGameTimer()
         WebConnect.Dispatch(publicName, payload, context, function(status, data, errorCode)
-            local durationMs = math.floor((os.clock() - startedAt) * 1000)
+            local durationMs = GetGameTimer() - startedAt
             TriggerEvent('web-connect:requestCompleted', id, status, durationMs, context)
             local body = errorCode
                 and { error = errorCode, requestId = id, details = data }
